@@ -36,9 +36,9 @@ RUN dnf install -y make cmake automake gcc gcc-c++ \
 
 RUN alias python3='python3.11'
 
-# Assumes you have a valid subman subscription
-    # This gets used for the codeready-builder-for-rhel-9-<arch> stream for openblas-devel
-
+# Assumes you have a valid subman subscription at the host machine
+RUN subscription-manager register --auto-attach
+# This gets used for the codeready-builder-for-rhel-9-<arch> stream for openblas-devel
 COPY build/docker/builder/cpu/rhel9/install-rpms.sh /root/install-rpms.sh
 RUN chmod +x /root/install-rpms.sh
 RUN /root/install-rpms.sh

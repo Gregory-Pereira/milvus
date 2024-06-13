@@ -20,8 +20,11 @@ env:
   TF_VAR_ami_id: ${{ secrets.AMI_ID }}
 
 jobs:
-  ai-lab-podman-remote:
+  rhel9-milvus:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      max-parallel: 1
     steps:
         - name: Setup Terraform
           uses: hashicorp/setup-terraform@v3.1.1
@@ -39,20 +42,58 @@ jobs:
 
         - name: Terraform Apply
           run: terraform apply -auto-approve
+        
+        - name: Set up Python
+          uses: actions/setup-python@v5.1.0
+          with:
+            python-version: '3.11'
 
-        - name: Terraform Output
-          id: terraform-output
+        - name: Install Ansible
           run: |
-            echo "id=$(terraform output id | xargs)" >> $GITHUB_OUTPUT
-            echo "url=$(terraform output host | xargs)" >> $GITHUB_OUTPUT
-            echo "ssh_public_key=$(terraform output ssh_public_key | xargs)" >> $GITHUB_OUTPUT
-            echo "pem_filename=$(terraform output pem_filename | xargs)" >> $GITHUB_OUTPUT
+            python3 -m pip install --upgrade pip
+            pip install ansible
 
-        - name: Install podman remote
+        # currently no reqs
+        # - name: Ansible Collections
+        #   working-directory: build/ci/rhel-ansible
+        #   run: ansible-galaxy install -r requirements.yaml
+
+        - name: Install jq and build inventory
           run: |
-            sudo apt-get install -y podman podman-remote
             sudo apt-get install -y jq
+            PUBLIC_IP=$(terraform output -json | jq -r '.public_ip.value')
+            # PUBLIC_IP=$(terraform output -json | jq -r '.public_ip.value' | cut -d "\"" -f 2)
+            echo "public_ip=$PUBLIC_IP" >> $GITHUB_OUTPUT
+            echo "[test_environments]" > build/ci/rhel-ansible/inventory.ini
+            echo "test_environment_host ansible_host=${PUBLIC_IP}" >> build/ci/rhel-ansible/inventory.ini
+            cat build/ci/rhel-ansible/inventory.ini
+
+        # - name: Setup tmate session
+        #   # if: ${{ failure() }}
+        #   uses: mxschmitt/action-tmate@v3.18
+        #   timeout-minutes: 15
+        #   with:
+        #     detached: true
+        #     limit-access-to-actor: true
+
+        - name: Provision
+          working-directory: build/ci/rhel-ansible
+          run: |
+            ansible-playbook -v playbook.yaml \
+              -i inventory.ini \
+              --private-key=/home/runner/.ssh/id_rsa \
+              --extra-vars "registry_user=${{ secrets.REGISTRY_USER }}" \
+              --extra-vars "registry_pass=${{ secrets.REGISTRY_PASS }}" \
+              --extra-vars "subman_user=${{ secrets.SUBMAN_USER }}" \
+              --extra-vars "subman_pass=${{ secrets.SUBMAN_PASS }}"
+          env:
+            ANSIBLE_CONFIG: ansible.cfg
 
         - name: Terraform Destroy
           if: always()
           run: terraform destroy -auto-approve
+
+        # For stacked runs of CI with concurrency allow for destroy to work
+        - name: Wait for 30 seconds for destroy to work
+          if: always()
+          run: sleep 30

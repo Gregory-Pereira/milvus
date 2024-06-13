@@ -1,0 +1,117 @@
+---
+- name: Building rhel9-milvus
+  hosts: test_environments
+  remote_user: ec2-user
+  become: true
+  gather_facts: false
+
+  tasks:
+
+  - name: Wait until the instance is ready
+    ansible.builtin.wait_for_connection:
+    delay: 15
+    timeout: 180
+
+  - name: Gather facts for first time
+    ansible.builtin.setup:
+
+  # - name: DEBUG - sleep
+  #   ansible.builtin.shell: |
+  #     sleep 600
+
+  - name: remove podman for clean docker install
+    ansible.builtin.shell: |
+      sudo dnf -y remove podman
+
+  - name: partways docker installation
+    ansible.builtin.shell: |
+      sudo yum install -y yum-utils
+
+  # - name: DEBUG - sleep
+  #   ansible.builtin.shell: |
+  #     sleep 600
+
+  - name: setup docker server and docker compose
+    async: 1000
+    poll: 0
+    register: docker_install_result
+    ansible.builtin.shell: |
+      # From official docker docs
+      
+      sudo yum-config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+      sudo yum install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      sudo systemctl start docker
+
+  
+  - name: Check on downloading docker + docker tools
+    async_status:
+      jid: "{{ docker_install_result.ansible_job_id }}"
+    register: job_result
+    until: job_result.finished
+    retries: 100
+    delay: 10
+
+  - name: Ensure Docker is running
+    ansible.builtin.systemd:
+      name: docker
+      state: started
+      enabled: yes
+
+  - name: Log in to quay.io
+    community.docker.docker_login:
+      username: "{{ registry_user }}"
+      password: "{{ registry_pass }}"
+      registry: quay.io
+
+  - name: Register to subscription manager
+    ansible.builtin.shell: |
+      subscription-manager register --username "{{ subman_user }}" --password "{{ subman_pass }}"
+    
+  - name: Clone Git repository
+    ansible.builtin.git:
+      repo: https://github.com/redhat-et/milvus.git
+      dest: "/home/ec2-user"
+      version: "rhel9-milvus"  
+      clone: yes
+      update: yes
+
+  - name: Make the builder image
+    async: 1000
+    poll: 0
+    register: builder_result
+    ansible.builtin.shell: |
+      cd /home/ec2-user/milvus
+      export IMAGE_REPO=quay.io/ai-lab
+      ./build/builder.sh make install
+
+  - name: Check on the builder image
+    async_status:
+      jid: "{{ build_result.ansible_job_id }}"
+    register: job_result
+    until: job_result.finished
+    retries: 100
+    delay: 10
+
+  - name: Make the milvus image
+    async: 1000
+    poll: 0
+    register: milvus_result
+    ansible.builtin.shell: |
+      cd /home/ec2-user/milvus
+      mv bin build/docker/milvus/rhel9/
+      mv configs build/docker/milvus/rhel9/
+      mv lib build/docker/milvus/rhel9/
+      ./build/build_image.sh make
+
+  - name: Check on the milvus image
+    async_status:
+      jid: "{{ milvus_result.ansible_job_id }}"
+    register: job_result
+    until: job_result.finished
+    retries: 100
+    delay: 10
+
+  - name: log docker images
+    ansible.builtin.shell: |
+      docker images
+  
